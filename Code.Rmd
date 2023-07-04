@@ -1,0 +1,152 @@
+---
+title: "MAP_MEK_trametinib_human"
+output: html_document
+date: "2023-02-24"
+---
+
+```{r message=FALSE, warning=FALSE}
+library(readr)
+library(progeny)
+library(GSVA)
+library(GSEABase)
+library(GSVAdata)
+library(ggplot2)
+library(reshape2)
+library(Hmisc)
+library(stats)
+library(knitr) 
+library(tidyverse, warn.conflict=F)
+library(readxl)
+```
+
+## Loading of TCGA data
+
+```{r}
+TCGA_TPM <- read_csv("TCGA_TPM.csv")
+TCGA_MASTERFILE_clinical_data <- read_excel("TCGA_MASTERFILE_clinical_data.xls")
+genes <- TCGA_TPM[,1]
+TCGA_TPM <- TCGA_TPM[,-1]
+rownames(TCGA_TPM) <- genes$...1
+i <- which(TCGA_MASTERFILE_clinical_data$HPV16 == "Negative")
+TCGA_HPVNeg <- TCGA_MASTERFILE_clinical_data[i,]
+Patients <- gsub("-", ".", TCGA_HPVNeg$Patient_ID)
+i <- which(colnames(TCGA_TPM) %in% Patients)
+TPM_HPVneg <- TCGA_TPM[,i]
+rownames(TPM_HPVneg) <- rownames(TCGA_TPM)
+rownames(TCGA_HPVNeg) <- gsub("-", ".", TCGA_HPVNeg$Patient_ID)
+```
+
+## Calculating Progeny scores
+
+```{r}
+#Progeny function via Progeny package
+progeny_scores <- as.data.frame(progeny(as.matrix(TPM_HPVneg)))
+```
+
+
+## Loading of calculated oncoPredict data
+
+```{r message=FALSE}
+GDSC1 <- read_csv("oncoPredict/Training_Data/calcPhenotype_Output_TCGA_HPVN_GDSC1/DrugPredictions.csv")
+sort(colnames(GDSC1))
+GDSC1_drugs <- c("Erlotinib_1", "Trametinib_1372", "Pictilisib_1058", "Pictilisib_1527")
+i <- which(colnames(GDSC1) %in% GDSC1_drugs)
+GDSC1_selected <- GDSC1[,i]
+rownames(GDSC1_selected) <- GDSC1$...1
+GDSC1_selected <- t(GDSC1_selected)
+GDSC1_selected_t <- as.data.frame(t(GDSC1_selected))
+TCGA_HPVNeg$Erlotinib_GDSC1 <- GDSC1_selected_t$Erlotinib_1
+TCGA_HPVNeg$Trametinib_GDSC1 <- GDSC1_selected_t$Trametinib_1372
+TCGA_HPVNeg$`GDC-0941_Pictilisib_1058_GDSC1` <- GDSC1_selected_t$Pictilisib_1058
+TCGA_HPVNeg$`GDC-0941_Pictilisib_1527_GDSC1` <- GDSC1_selected_t$Pictilisib_1527
+```
+
+## k-means clustering for Progeny scores
+
+```{r}
+library(factoextra)
+clustering <- kmeans(progeny_scores, 3, nstart = 25)
+TCGA_HPVNeg$kmeans_cluster_progeny <- clustering$cluster
+choose_matrix <- as.data.frame(cbind(progeny_scores, clustering$cluster))
+o <- choose_matrix[order(choose_matrix$`clustering$cluster`),]
+ordered <- as.data.frame(t(o[,-15]))
+```
+
+```{r}
+kmeans_progeny <- TCGA_HPVNeg[order(TCGA_HPVNeg$kmeans_cluster_progeny),]
+rownames(kmeans_progeny) <- gsub("-", ".", kmeans_progeny$Patient_ID)
+rownames(kmeans_progeny)==colnames(ordered)
+kmeans_progeny$kmeans_cluster_progeny <- factor(kmeans_progeny$kmeans_cluster_progeny, levels = c(3,2,1), labels = c("Low", "Medium", "High")) 
+```
+
+```{r}
+newCols <- colorRampPalette(grDevices::rainbow(length(unique(kmeans_progeny$kmeans_cluster_progeny))))
+mycolors <- newCols(length(unique(kmeans_progeny$kmeans_cluster_progeny)))
+names(mycolors) <- unique(kmeans_progeny$kmeans_cluster_progeny)
+mycolors <- list(category = mycolors)
+```
+
+```{r}
+low <- subset(kmeans_progeny, kmeans_progeny$kmeans_cluster_progeny == "Low")
+medium <-subset(kmeans_progeny, kmeans_progeny$kmeans_cluster_progeny == "Medium")
+high <- subset(kmeans_progeny, kmeans_progeny$kmeans_cluster_progeny == "High")
+order <- rbind(low, medium, high)
+rownames(order) <- gsub("-", ".", order$Patient_ID)
+```
+
+```{r}
+which(colnames(ordered) %in% rownames(order))
+```
+
+```{r}
+ordered1 <- ordered[,rownames(order)]
+```
+
+## Heatmap representation 
+
+```{r}
+ library(pheatmap)
+  choose_matrix=ordered1
+  #choose_matrix[1:4,1:4]
+  #choose_matrix=t(scale(t(log2(choose_matrix+1))))
+  ## http://www.bio-info-trainee.com/1980.html
+  annotation_col = data.frame(Progeny_cluster = order$kmeans_cluster_progeny)
+  ann_colors = list(
+    Progeny_cluster = c(Low = "indianred2", Medium = "palegreen3", High = "cornflowerblue") 
+)
+  rownames(annotation_col)=colnames(ordered1)
+  pheatmap(scale(choose_matrix, center = T),show_colnames = T,annotation_col = annotation_col, show_rownames = T, legend = T, fontsize_row = 7, fontsize_col = 13, cluster_rows = F, border_color=NA, cluster_cols = F, annotation_colors = ann_colors
+           , 
+           gaps_col = c(113,287)
+           #,
+           #filename = 'progeny_cluster_pathways_HNSCC_patients_progeny.png'
+           )
+```
+
+## MAPK activity for patients in clusters
+
+```{r}
+MAPK_progeny <- as.data.frame(t(ordered1))
+order$MAPK_progeny <- MAPK_progeny$MAPK
+```
+
+```{r}
+my_comparisons <- list( c("Low", "Medium"), c("Low", "High"), c("Medium", "High"))
+ggplot(order, aes(x=kmeans_cluster_progeny, y=MAPK_progeny, fill=kmeans_cluster_progeny)) + # fill=name allow to automatically dedicate a color for each group
+  geom_violin(width=0.8) +
+    geom_boxplot(width=0.1, color="black", alpha=0.2) +
+    stat_compare_means(comparisons = my_comparisons
+                     , label.y = c(4,5.5 , 4.5)) +
+    stat_compare_means(label.y = 7) 
+```
+
+## Trametenib sensitivity score for patients in cluster
+
+```{r}
+ggplot(TCGA_HPVNeg, aes(x=kmeans_cluster_progeny, y=Trametinib_GDSC1, fill=kmeans_cluster_progeny)) + # fill=name allow to automatically dedicate a color for each group
+  geom_violin(width=0.8) +
+    geom_boxplot(width=0.1, color="black", alpha=0.2) +
+    stat_compare_means(comparisons = my_comparisons
+                     , label.y = c(8,10 , 8.5)) +
+    stat_compare_means(label.y = 12) 
+```
